@@ -9,6 +9,8 @@
 
 #include <cassert>
 #include <vector>
+#include <map>
+#include <set>
 
 namespace louds {
 namespace {
@@ -71,12 +73,12 @@ struct BitVector {
   }
   // build builds indexes for rank and select.
   void build() {
-    uint64_t n_blocks = words.size() / 4;
+    uint64_t n_blocks = words.size() / 4; //256
     uint64_t n_ones = 0;
     ranks.resize(n_blocks + 1);
     for (uint64_t block_id = 0; block_id < n_blocks; ++block_id) {
       ranks[block_id].set_abs(n_ones);
-      for (uint64_t j = 0; j < 4; ++j) {
+      for (uint64_t j = 0; j < 4; ++j) { //64 (word)
         if (j != 0) {
           uint64_t rel = n_ones - ranks[block_id].abs();
           ranks[block_id].rels[j - 1] = rel;
@@ -107,10 +109,10 @@ struct BitVector {
 
   // rank returns the number of 1-bits in the range [0, i).
   uint64_t rank(uint64_t i) const {
-    uint64_t word_id = i / 64;
-    uint64_t bit_id = i % 64;
-    uint64_t rank_id = word_id / 4;
-    uint64_t rel_id = word_id % 4;
+    uint64_t word_id = i / 64; // Which 64-bit word contains position i
+    uint64_t bit_id = i % 64; // Which bit in the word
+    uint64_t rank_id = word_id / 4; // Which block contains the word
+    uint64_t rel_id = word_id % 4; // Which word in the block
     uint64_t n = ranks[rank_id].abs();
     if (rel_id != 0) {
       n += ranks[rank_id].rels[rel_id - 1];
@@ -118,7 +120,8 @@ struct BitVector {
     n += Popcnt(words[word_id] & ((1UL << bit_id) - 1));
     return n;
   }
-  // select returns the position of the (i+1)-th 1-bit.
+
+  // select returns the position of the (i+1)-th 1-bit. log(n)
   uint64_t select(uint64_t i) const {
     const uint64_t block_id = i / 256;
     uint64_t begin = selects[block_id];
@@ -140,6 +143,7 @@ struct BitVector {
     const uint64_t rank_id = begin;
     i -= ranks[rank_id].abs();
 
+    // determine which of the 4 words contains our bit
     uint64_t word_id = rank_id * 4;
     if (i < ranks[rank_id].rels[1]) {
       if (i >= ranks[rank_id].rels[0]) {
@@ -199,6 +203,9 @@ class TrieImpl {
     return size_;
   }
 
+  bool is_key_end(uint64_t node_id, uint64_t level_idx) const;
+  vector<pair<uint64_t, char>> get_children(uint64_t node_id, uint64_t level_idx) const;
+
  private:
   vector<Level> levels_;
   uint64_t n_keys_;
@@ -207,6 +214,51 @@ class TrieImpl {
   string last_key_;
 };
 
+// Helper class to efficiently merge tries
+class TrieMerger {
+  public:
+    TrieMerger(const TrieImpl& trie1, const TrieImpl& trie2) 
+      : trie1_(trie1), trie2_(trie2), result_(new TrieImpl()) {}
+    
+    TrieImpl* merge() {
+      // Get all keys from both tries
+      std::set<std::string> all_keys;
+      collectKeys(trie1_, 0, 0, "", all_keys);
+      collectKeys(trie2_, 0, 0, "", all_keys);
+      
+      // Add all keys to the result trie in sorted order
+      for (const std::string& key : all_keys) {
+        result_->add(key);
+      }
+      
+      result_->build();
+      return result_;
+    }
+  
+  private:
+    const TrieImpl& trie1_;
+    const TrieImpl& trie2_;
+    TrieImpl* result_;
+    
+    // Recursively collect all keys from a trie
+    void collectKeys(const TrieImpl& trie, uint64_t node_id, uint64_t level, 
+                     const std::string& prefix, std::set<std::string>& keys) {
+      // If current node represents a key, add it to the set
+      if (trie.is_key_end(node_id, level)) {
+        keys.insert(prefix);
+      }
+      
+      // Get all children of the current node
+      std::vector<std::pair<uint64_t, char>> children = trie.get_children(node_id, level);
+      
+      // Recursively process all children
+      for (const auto& child : children) {
+        uint64_t child_id = child.first;
+        char label = child.second;
+        collectKeys(trie, child_id, level + 1, prefix + label, keys);
+      }
+    }
+};
 TrieImpl::TrieImpl()
   : levels_(2), n_keys_(0), n_nodes_(1), size_(0), last_key_() {
   levels_[0].louds.add(0);
@@ -224,6 +276,7 @@ void TrieImpl::add(const string &key) {
     ++n_keys_;
     return;
   }
+  // the levels vector has enough space for this key plus an extra level
   if (key.length() + 1 >= levels_.size()) {
     levels_.resize(key.length() + 2);
   }
@@ -329,6 +382,54 @@ int64_t TrieImpl::lookup(const string &query) const {
   return level.offset + level.outs.rank(node_id);
 }
 
+bool TrieImpl::is_key_end(uint64_t node_id, uint64_t level_idx) const {
+  if (level_idx >= levels_.size()) return false;
+  const Level& level = levels_[level_idx];
+  return level.outs.get(node_id) == 1;
+}
+
+// Helper method to get all children of a node
+vector<pair<uint64_t, char>> TrieImpl::get_children(uint64_t node_id, uint64_t level_idx) const {
+  vector<pair<uint64_t, char>> children;
+  if (level_idx >= levels_.size() - 1) return children;
+  
+  const Level& next_level = levels_[level_idx + 1];
+  uint64_t node_pos;
+  
+  if (node_id != 0) {
+    node_pos = next_level.louds.select(node_id - 1) + 1;
+    node_id = node_pos - node_id;
+  } else {
+    node_pos = 0;
+  }
+  
+  // Find the end position for children
+  uint64_t end = node_pos;
+  uint64_t word = next_level.louds.words[end / 64] >> (end % 64);
+  if (word == 0) {
+    end += 64 - (end % 64);
+    word = next_level.louds.words[end / 64];
+    while (word == 0) {
+      end += 64;
+      word = next_level.louds.words[end / 64];
+    }
+  }
+  end += Ctz(word);
+  
+  uint64_t begin = node_id;
+  end = begin + end - node_pos;
+  
+  // Collect all children
+  for (uint64_t id = begin; id < end; ++id) {
+    uint64_t pos = node_pos + (id - begin);
+    if (!next_level.louds.get(pos)) {
+      children.push_back({id, next_level.labels[id]});
+    }
+  }
+  
+  return children;
+}
+
 Trie::Trie() : impl_(new TrieImpl) {}
 
 Trie::~Trie() {
@@ -359,4 +460,21 @@ uint64_t Trie::size() const {
   return impl_->size();
 }
 
+void Trie::merge(const Trie& other) {
+  // Create a merger and replace the current implementation with the merged result
+  TrieMerger merger(*impl_, *(other.impl_));
+  TrieImpl* merged = merger.merge();
+  
+  delete impl_;
+  impl_ = merged;
+}
+
+Trie* Trie::merge_trie(const Trie& trie1, const Trie& trie2) {
+  Trie* result = new Trie();
+  delete result->impl_;
+  
+  TrieMerger merger(*(trie1.impl_), *(trie2.impl_));
+  result->impl_ = merger.merge();
+  return result;
+}
 }  // namespace louds
