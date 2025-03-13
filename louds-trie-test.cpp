@@ -15,8 +15,7 @@ void print_trie(const Trie& trie) {
          << trie.n_nodes() << " nodes, " 
          << trie.size() << " bytes" << endl;
     
-    // We could add a function to print the keys, but for these tests
-    // we'll rely on lookup to verify correctness
+    // use lookup to verify correctness
 }
 
 // Test basic functionality
@@ -96,7 +95,6 @@ void test_merge() {
     assert(merged_trie->n_keys() == expected_keys.size() && 
            "Merged trie has incorrect number of keys!");
     
-    // Clean up
     delete merged_trie;
     
     // Now test the instance merge method
@@ -176,7 +174,6 @@ void test_empty_tries() {
     cout << "Empty + Empty:" << endl;
     print_trie(*merged3);
     
-    // Clean up
     delete merged1;
     delete merged2;
     delete merged3;
@@ -253,7 +250,6 @@ void test_large_tries() {
         check_count++;
     }
     
-    // Clean up
     delete merged;
     
     cout << "Large trie merging test passed!" << endl;
@@ -272,9 +268,9 @@ void test_prefix_lookups() {
     trie.build();
     
     // Test that prefixes of keys return -1 if not exact matches
-    assert(trie.lookup("app") == -1 && "Prefix 'app' should not be found!");
-    assert(trie.lookup("appl") == -1 && "Prefix 'appl' should not be found!");
-    assert(trie.lookup("ba") == -1 && "Prefix 'ba' should not be found!");
+    assert(trie.lookup("app") == false && "Prefix 'app' should not be found!");
+    assert(trie.lookup("appl") == false && "Prefix 'appl' should not be found!");
+    assert(trie.lookup("ba") == false && "Prefix 'ba' should not be found!");
     
     // But exact matches should work
     assert(trie.lookup("a") >= 0 && "Key 'a' should be found!");
